@@ -11,6 +11,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import gc
 import os
 import warnings
 from contextlib import nullcontext
@@ -1078,15 +1079,13 @@ def validate(
         print("  ⚠️ No validation dataloader provided, skipping validation", flush=True)
         return {}, {}
 
-    # Get number of evaluations per sample (default to 1 for backward compatibility)
-    num_evaluations_per_sample = master_config["grpo"].get("num_evaluations_per_sample", 1)
-    
     timer = Timer()
     with timer.time("total_validation_time"):
         print(f"▶ Starting validation at step {step}...", flush=True)
-        if num_evaluations_per_sample > 1:
-            print(f"  • Each sample will be evaluated {num_evaluations_per_sample} times", flush=True)
 
+        # Get num_evaluations_per_sample from config, default to 1 if not specified
+        num_evaluations_per_sample = master_config["grpo"].get("num_evaluations_per_sample", 1)
+        
         total_rewards = []
         total_lengths = []
         all_message_logs = []  # Collect all message logs
@@ -1095,64 +1094,51 @@ def validate(
             master_config["grpo"]["max_val_samples"]
             // master_config["grpo"]["val_batch_size"]
         )
-        
         for batch_idx, val_batch in enumerate(val_dataloader):
             if batch_idx >= max_batches:
                 break
 
-            # For each batch, we need to evaluate each sample multiple times
-            batch_rewards = []
-            batch_lengths = []
-            batch_message_logs = []
-            
-            for eval_idx in range(num_evaluations_per_sample):
-                if num_evaluations_per_sample > 1:
-                    print(f"  • Batch {batch_idx + 1}/{max_batches}, Evaluation {eval_idx + 1}/{num_evaluations_per_sample}", flush=True)
-                
-                # Create a copy of the batch for this evaluation
-                eval_batch = val_batch.copy()
-                
-                # Generate responses (updates the LLMMessageLogType in batch_with_msg_logs)
-                # Use async rollouts if vLLM async engine is enabled
-                if _should_use_async_rollouts(master_config):
-                    eval_batch, gen_metrics = run_async_multi_turn_rollout(
-                        policy_generation,
-                        eval_batch,
-                        tokenizer,
-                        val_task_to_env,
-                        max_seq_len=master_config["policy"]["max_total_sequence_length"],
-                        max_rollout_turns=master_config["grpo"]["max_rollout_turns"],
-                        greedy=False,
-                    )
-                else:
-                    eval_batch, gen_metrics = run_multi_turn_rollout(
-                        policy_generation,
-                        eval_batch,
-                        tokenizer,
-                        val_task_to_env,
-                        max_seq_len=master_config["policy"]["max_total_sequence_length"],
-                        max_rollout_turns=master_config["grpo"]["max_rollout_turns"],
-                        greedy=False,
-                    )
-                
-                rewards = eval_batch["total_reward"]
-                batch_rewards.extend(rewards.tolist())
-                batch_lengths.append(gen_metrics["mean_gen_tokens_per_sample"])
+            # Replicate batch if num_evaluations_per_sample > 1
+            if num_evaluations_per_sample > 1:
+                print(f"  ▶ Replicating batch {num_evaluations_per_sample} times for multiple evaluations...", flush=True)
+                val_batch = val_batch.repeat_interleave(num_evaluations_per_sample)
 
-                # Collect message logs for later display (only from first evaluation to avoid duplicates)
-                if eval_idx == 0:
-                    to_env = [
-                        get_keys_from_message_log(
-                            eval_batch["message_log"][i], ["role", "content"]
-                        )
-                        for i in range(len(eval_batch["message_log"]))
-                    ]
-                    batch_message_logs.extend(to_env)
-            
-            # Add all rewards and lengths from this batch (across all evaluations)
-            total_rewards.extend(batch_rewards)
-            total_lengths.extend(batch_lengths)
-            all_message_logs.extend(batch_message_logs)
+            # Generate responses (updates the LLMMessageLogType in batch_with_msg_logs)
+            # Use async rollouts if vLLM async engine is enabled
+            if _should_use_async_rollouts(master_config):
+                val_batch, gen_metrics = run_async_multi_turn_rollout(
+                    policy_generation,
+                    val_batch,
+                    tokenizer,
+                    val_task_to_env,
+                    max_seq_len=master_config["policy"]["max_total_sequence_length"],
+                    max_rollout_turns=master_config["grpo"]["max_rollout_turns"],
+                    greedy=False,
+                )
+            else:
+                val_batch, gen_metrics = run_multi_turn_rollout(
+                    policy_generation,
+                    val_batch,
+                    tokenizer,
+                    val_task_to_env,
+                    max_seq_len=master_config["policy"]["max_total_sequence_length"],
+                    max_rollout_turns=master_config["grpo"]["max_rollout_turns"],
+                    greedy=False,
+                )
+            rewards = val_batch["total_reward"]
+
+            total_rewards.extend(rewards.tolist())
+            total_lengths.append(gen_metrics["mean_gen_tokens_per_sample"])
+
+            # Collect message logs for later display
+            to_env = [
+                get_keys_from_message_log(
+                    val_batch["message_log"][i], ["role", "content"]
+                )
+                for i in range(len(val_batch["message_log"]))
+            ]
+
+            all_message_logs.extend(to_env)
 
         # Calculate validation metrics
         accuracy = sum(total_rewards) / len(total_rewards)
@@ -1167,8 +1153,7 @@ def validate(
         try:
             print_message_log_samples(
                 all_message_logs,
-                # Use only the first evaluation's rewards for display (to match message logs)
-                total_rewards[::num_evaluations_per_sample],
+                total_rewards,
                 num_samples=min(
                     master_config["logger"]["num_val_samples_to_print"],
                     len(all_message_logs),
@@ -1187,12 +1172,11 @@ def validate(
     print("\n📊 Validation Results:")
     print(f"    • Accuracy: {accuracy:.4f}")
     print(f"    • Average response length: {avg_length:.1f} tokens")
-    
-    # Calculate and display the actual number of samples
-    unique_samples = len(total_rewards) // num_evaluations_per_sample
-    total_evaluations = len(total_rewards)
-    print(f"    • Unique samples: {unique_samples}")
-    print(f"    • Total evaluations: {total_evaluations} ({num_evaluations_per_sample} per sample)", flush=True)
+    if num_evaluations_per_sample > 1:
+        original_samples = len(total_rewards) // num_evaluations_per_sample
+        print(f"    • Samples processed: {len(total_rewards)} (original: {original_samples}, {num_evaluations_per_sample} evaluations each)", flush=True)
+    else:
+        print(f"    • Samples processed: {len(total_rewards)}", flush=True)
 
     # Print timing information
     print("\n  ⏱️  Validation Timing:")
@@ -1201,5 +1185,9 @@ def validate(
 
     # Make sure to reset the timer after validation
     timer.reset()
+
+    # Explicit GPU memory cleanup after validation
+    gc.collect()
+    torch.cuda.empty_cache()
 
     return val_metrics, timing_metrics
