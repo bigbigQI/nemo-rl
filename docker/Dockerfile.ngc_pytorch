@@ -9,9 +9,16 @@
 #
 # If installing new dependencies in the container, then use "uv pip install new-dependency"
 ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:25.06-py3
-FROM scratch AS nemo-rl
+FROM ${BASE_IMAGE} AS nemo-rl-download
 ARG NRL_GIT_REF=main
-ADD --keep-git-dir=true https://github.com/NVIDIA-NeMo/RL.git#${NRL_GIT_REF} /
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+WORKDIR /tmp
+RUN git clone --depth 1 --branch ${NRL_GIT_REF} https://github.com/NVIDIA-NeMo/RL.git nemo-rl
+
+RUN cd nemo-rl && git submodule update --init --recursive && cd ..
+
+FROM scratch AS nemo-rl
+COPY --from=nemo-rl-download /tmp/nemo-rl /
 
 FROM ${BASE_IMAGE} AS base
 
@@ -49,7 +56,7 @@ ENV NEMO_RL_VENV_DIR=/opt/ray_venvs
 # Build vLLM from source to use with the NVIDIA PyTorch base image
 FROM base AS build_vllm
 
-ARG MAX_JOBS=32
+ARG MAX_JOBS=16
 WORKDIR /opt
 COPY --from=nemo-rl uv.lock /tmp/uv.lock
 
@@ -90,7 +97,6 @@ COPY --from=nemo-rl --link 3rdparty/ ./3rdparty/
 
 
 RUN --mount=type=bind,from=build_vllm,source=/opt/,target=/tmp/build_vllm/ <<"EOF" bash -exu
-
 # uv sync has a more reliable resolver than simple uv pip install which can fail
 # The venv is symlinked to avoid bloating the layer size
 uv venv --system-site-packages ${UV_PROJECT_ENVIRONMENT}
@@ -124,5 +130,5 @@ COPY --from=nemo-rl . /opt/nemo-rl
 # Unshallow the repo to get the full history (in the case it was from the scratch layer).
 # Potentially not necessary if the repo is passed in as a complete repository (w/ full git history),
 # so do a quick check before trying to unshallow.
-RUN git rev-parse --is-shallow-repository | grep -q true && git fetch --unshallow || true
+RUN echo "Using shallow clone, no need to unshallow"
 RUN UV_LINK_MODE=symlink uv sync --locked --inexact $UV_NO_INSTALL_PACKAGES

@@ -35,7 +35,7 @@ checkpointing:
   checkpoint_must_save_by: null
 
 policy:
-  model_name: "Qwen/Qwen2.5-1.5B"
+  model_name: "/apps/models/Qwen2.5-1.5B"
   tokenizer:
     name: ${policy.model_name} ## specify if you'd like to use a tokenizer different from the model's default
   train_global_batch_size: 512
@@ -228,5 +228,5 @@ logger:
     flush_interval: 10  # How often to flush GPU usage metrics to the loggers (in seconds)
 
 cluster:
-  gpus_per_node: 1
+  gpus_per_node: 8
   num_nodes: 1

@@ -359,6 +359,11 @@ class BaseVllmGenerationWorker:
             # overriden by quant config, however vllm complains if this not passed
             self.precision = "bfloat16"
 
+        # Handle FP8 KV Cache configuration
+        if self.cfg["vllm_cfg"].get("fp8_kv_cache", False):
+            vllm_kwargs["kv_cache_dtype"] = "fp8"
+            vllm_kwargs["calculate_kv_scales"] = True
+
         llm_kwargs = dict(
             model=self.model_name,
             load_format=load_format,

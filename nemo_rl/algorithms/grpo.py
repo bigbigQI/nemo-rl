@@ -88,6 +88,7 @@ class GRPOConfig(TypedDict):
     max_val_samples: int
     seed: int
     overlong_filtering: NotRequired[bool]
+    num_evaluations_per_sample: NotRequired[int]
 
 
 class GRPOSaveState(TypedDict):
@@ -334,10 +335,10 @@ def setup(
         )
     elif backend == "vllm":
         generation_config = cast(VllmConfig, generation_config)
-        if generation_config["vllm_cfg"]["precision"] == "fp8":
-            assert loss_config["use_importance_sampling_correction"] is True, (
-                "Importance sampling must be enabled for vLLM FP8 generation for good convergence!"
-            )
+        # if generation_config["vllm_cfg"]["precision"] == "fp8":
+        #     assert loss_config["use_importance_sampling_correction"] is True, (
+        #         "Importance sampling must be enabled for vLLM FP8 generation for good convergence!"
+        #     )
 
         policy_generation = VllmGeneration(
             cluster=inference_cluster, config=generation_config
@@ -408,9 +409,78 @@ def setup(
     )
 
 
-# ===============================================================================
-# Core Algorithm Functions
-# ===============================================================================
+# # ===============================================================================
+# # Core Algorithm Functions
+# # ===============================================================================
+
+
+# def _apply_icepop_token_filtering(
+#     train_data: BatchedDataDict,
+#     master_config: MasterConfig,
+#     chunk_size: int = 128
+# ) -> None:
+#     """Apply ICEPOP filtering to token mask with memory-optimized computation.
+    
+#     This function filters tokens based on importance weights computed from logprob differences.
+#     For large matrices (e.g., 16k x 16k), it processes data in chunks to reduce memory usage.
+    
+#     Args:
+#         train_data: Training data containing token_mask, prev_logprobs, generation_logprobs
+#         master_config: Configuration containing ICEPOP parameters
+#         chunk_size: Size of chunks for processing large tensors (default: 1024)
+#     """
+#     loss_config = master_config["loss_fn"]
+#     icepop_min = loss_config.get("icepop_min", 0.8)
+#     icepop_max = loss_config.get("icepop_max", 1.2)
+#     sequence_level = loss_config.get("sequence_level_importance_ratios", False)    
+#     prev_logprobs = train_data["prev_logprobs"]
+#     generation_logprobs = train_data["generation_logprobs"]
+#     original_token_mask = train_data["token_mask"]
+    
+#     batch_size, seq_len = prev_logprobs.shape
+#     # print(f"[lark log]: Processing tensor shape: [{batch_size}, {seq_len}]")
+    
+#     # Memory-optimized importance weight calculation
+#     if sequence_level:
+#         # Sequence-level: compute sum once, then broadcast
+#         with torch.no_grad():
+#             seq_lp_diff = ((prev_logprobs - generation_logprobs) * original_token_mask).sum(dim=-1)
+#             actor_importance_weights = torch.exp(seq_lp_diff).clamp(min=1e-8, max=1e8)
+#             icepop_mask = (
+#                 (actor_importance_weights >= icepop_min) & 
+#                 (actor_importance_weights <= icepop_max)
+#             ).unsqueeze(-1).expand(-1, seq_len)
+#     else:
+#         # Token-level: process in chunks to reduce memory usage
+#         icepop_mask = torch.zeros_like(original_token_mask, dtype=torch.bool)
+        
+#         with torch.no_grad():
+#             for start_idx in range(0, batch_size, chunk_size):
+#                 end_idx = min(start_idx + chunk_size, batch_size)
+                
+#                 # Process chunk
+#                 chunk_prev = prev_logprobs[start_idx:end_idx]
+#                 chunk_gen = generation_logprobs[start_idx:end_idx]
+                
+#                 # Compute importance weights for chunk
+#                 chunk_weights = torch.exp(chunk_prev - chunk_gen).clamp(min=1e-8, max=1e8)
+                
+#                 # Apply ICEPOP mask for chunk
+#                 chunk_mask = (chunk_weights >= icepop_min) & (chunk_weights <= icepop_max)
+#                 icepop_mask[start_idx:end_idx] = chunk_mask
+                
+#                 # Clear chunk tensors to save memory
+#                 del chunk_weights, chunk_mask
+    
+#     # Compute intersection efficiently
+#     intersection_mask = (original_token_mask != 0) & icepop_mask
+#     train_data["token_mask"] = torch.where(
+#         intersection_mask, 
+#         original_token_mask, 
+#         torch.zeros_like(original_token_mask)
+#     )
+#     # Clean up temporary tensors
+#     del icepop_mask, intersection_mask
 
 
 def _should_use_async_rollouts(master_config: MasterConfig) -> bool:
@@ -717,8 +787,6 @@ def grpo_train(
                             "make_sequence_length_divisible_by"
                         ],
                     )
-
-                    # Create training data from flattened messages
                     train_data = BatchedDataDict[ClippedPGLossDataDict](
                         {
                             "input_ids": flat_messages["token_ids"],
@@ -747,6 +815,13 @@ def grpo_train(
                     )["reference_logprobs"]
                     train_data["prev_logprobs"] = fprop_logprobs
                     train_data["reference_policy_logprobs"] = reference_logprobs
+
+                # use_icepop_fixed = master_config["loss_fn"]["use_icepop_fixed"]
+                # use_importance_sampling_correction = master_config["loss_fn"]["use_importance_sampling_correction"]
+                # if use_icepop_fixed and use_importance_sampling_correction:
+                #     print("\n▶ Applying ICEPOP filtering...")
+                #     with timer.time("icepop_filtering"):
+                #         _apply_icepop_token_filtering(train_data, master_config)
 
                 print("▶ Preparing for training...", flush=True)
                 with timer.time("training_prep"):
@@ -870,6 +945,17 @@ def grpo_train(
                 "total_num_tokens": input_lengths.numpy(),
             }
             metrics.update(train_results["all_mb_metrics"])
+            
+            # Special handling for ICEPOP metrics that need max/min across the entire step
+            icepop_max_metrics = [
+                "importance_weights_before_icepop_max",
+                "importance_weights_after_icepop_max"
+            ]
+            icepop_min_metrics = [
+                "importance_weights_before_icepop_min", 
+                "importance_weights_after_icepop_min"
+            ]
+            
             for k, v in metrics.items():
                 if k in {
                     "lr",
@@ -880,6 +966,12 @@ def grpo_train(
                     "mean_prompt_length",
                 }:
                     metrics[k] = np.mean(v).item()
+                elif k in icepop_max_metrics:
+                    # For max metrics, take the maximum value across all microbatches
+                    metrics[k] = np.max(v).item()
+                elif k in icepop_min_metrics:
+                    # For min metrics, take the minimum value across all microbatches
+                    metrics[k] = np.min(v).item()
                 else:
                     metrics[k] = np.sum(v).item()
             metrics.update(rollout_metrics)
@@ -986,9 +1078,14 @@ def validate(
         print("  ⚠️ No validation dataloader provided, skipping validation", flush=True)
         return {}, {}
 
+    # Get number of evaluations per sample (default to 1 for backward compatibility)
+    num_evaluations_per_sample = master_config["grpo"].get("num_evaluations_per_sample", 1)
+    
     timer = Timer()
     with timer.time("total_validation_time"):
         print(f"▶ Starting validation at step {step}...", flush=True)
+        if num_evaluations_per_sample > 1:
+            print(f"  • Each sample will be evaluated {num_evaluations_per_sample} times", flush=True)
 
         total_rewards = []
         total_lengths = []
@@ -998,46 +1095,64 @@ def validate(
             master_config["grpo"]["max_val_samples"]
             // master_config["grpo"]["val_batch_size"]
         )
+        
         for batch_idx, val_batch in enumerate(val_dataloader):
             if batch_idx >= max_batches:
                 break
 
-            # Generate responses (updates the LLMMessageLogType in batch_with_msg_logs)
-            # Use async rollouts if vLLM async engine is enabled
-            if _should_use_async_rollouts(master_config):
-                val_batch, gen_metrics = run_async_multi_turn_rollout(
-                    policy_generation,
-                    val_batch,
-                    tokenizer,
-                    val_task_to_env,
-                    max_seq_len=master_config["policy"]["max_total_sequence_length"],
-                    max_rollout_turns=master_config["grpo"]["max_rollout_turns"],
-                    greedy=False,
-                )
-            else:
-                val_batch, gen_metrics = run_multi_turn_rollout(
-                    policy_generation,
-                    val_batch,
-                    tokenizer,
-                    val_task_to_env,
-                    max_seq_len=master_config["policy"]["max_total_sequence_length"],
-                    max_rollout_turns=master_config["grpo"]["max_rollout_turns"],
-                    greedy=False,
-                )
-            rewards = val_batch["total_reward"]
+            # For each batch, we need to evaluate each sample multiple times
+            batch_rewards = []
+            batch_lengths = []
+            batch_message_logs = []
+            
+            for eval_idx in range(num_evaluations_per_sample):
+                if num_evaluations_per_sample > 1:
+                    print(f"  • Batch {batch_idx + 1}/{max_batches}, Evaluation {eval_idx + 1}/{num_evaluations_per_sample}", flush=True)
+                
+                # Create a copy of the batch for this evaluation
+                eval_batch = val_batch.copy()
+                
+                # Generate responses (updates the LLMMessageLogType in batch_with_msg_logs)
+                # Use async rollouts if vLLM async engine is enabled
+                if _should_use_async_rollouts(master_config):
+                    eval_batch, gen_metrics = run_async_multi_turn_rollout(
+                        policy_generation,
+                        eval_batch,
+                        tokenizer,
+                        val_task_to_env,
+                        max_seq_len=master_config["policy"]["max_total_sequence_length"],
+                        max_rollout_turns=master_config["grpo"]["max_rollout_turns"],
+                        greedy=False,
+                    )
+                else:
+                    eval_batch, gen_metrics = run_multi_turn_rollout(
+                        policy_generation,
+                        eval_batch,
+                        tokenizer,
+                        val_task_to_env,
+                        max_seq_len=master_config["policy"]["max_total_sequence_length"],
+                        max_rollout_turns=master_config["grpo"]["max_rollout_turns"],
+                        greedy=False,
+                    )
+                
+                rewards = eval_batch["total_reward"]
+                batch_rewards.extend(rewards.tolist())
+                batch_lengths.append(gen_metrics["mean_gen_tokens_per_sample"])
 
-            total_rewards.extend(rewards.tolist())
-            total_lengths.append(gen_metrics["mean_gen_tokens_per_sample"])
-
-            # Collect message logs for later display
-            to_env = [
-                get_keys_from_message_log(
-                    val_batch["message_log"][i], ["role", "content"]
-                )
-                for i in range(len(val_batch["message_log"]))
-            ]
-
-            all_message_logs.extend(to_env)
+                # Collect message logs for later display (only from first evaluation to avoid duplicates)
+                if eval_idx == 0:
+                    to_env = [
+                        get_keys_from_message_log(
+                            eval_batch["message_log"][i], ["role", "content"]
+                        )
+                        for i in range(len(eval_batch["message_log"]))
+                    ]
+                    batch_message_logs.extend(to_env)
+            
+            # Add all rewards and lengths from this batch (across all evaluations)
+            total_rewards.extend(batch_rewards)
+            total_lengths.extend(batch_lengths)
+            all_message_logs.extend(batch_message_logs)
 
         # Calculate validation metrics
         accuracy = sum(total_rewards) / len(total_rewards)
@@ -1052,7 +1167,8 @@ def validate(
         try:
             print_message_log_samples(
                 all_message_logs,
-                total_rewards,
+                # Use only the first evaluation's rewards for display (to match message logs)
+                total_rewards[::num_evaluations_per_sample],
                 num_samples=min(
                     master_config["logger"]["num_val_samples_to_print"],
                     len(all_message_logs),
@@ -1071,7 +1187,12 @@ def validate(
     print("\n📊 Validation Results:")
     print(f"    • Accuracy: {accuracy:.4f}")
     print(f"    • Average response length: {avg_length:.1f} tokens")
-    print(f"    • Samples processed: {len(total_rewards)}", flush=True)
+    
+    # Calculate and display the actual number of samples
+    unique_samples = len(total_rewards) // num_evaluations_per_sample
+    total_evaluations = len(total_rewards)
+    print(f"    • Unique samples: {unique_samples}")
+    print(f"    • Total evaluations: {total_evaluations} ({num_evaluations_per_sample} per sample)", flush=True)
 
     # Print timing information
     print("\n  ⏱️  Validation Timing:")

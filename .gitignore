@@ -42,6 +42,8 @@ wandb/
 checkpoints/
 results/
 code_snapshots*/
+slurm/
+log*
 
 # Runtime env
 *runtime_env.yaml

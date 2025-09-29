@@ -1,0 +1,61 @@
+#!/bin/bash
+
+#SBATCH --account=coreai_dlalgo_nemorl
+#SBATCH --exclusive
+#SBATCH --partition=batch
+#SBATCH --job-name=fp8_rollout
+#SBATCH --mail-type=ALL
+#SBATCH --ntasks-per-node=1
+#SBATCH --nodes=1
+#SBATCH --gres=gpu:8
+#SBATCH --time=3:59:00
+#SBATCH --output=./slurm/%j.out
+#SBATCH --error=./slurm/%j.err
+##SBATCH --overcommit
+
+set -x
+
+# CONTAINER="nvcr.io/nvidia/pytorch:25.04-py3"
+# CONTAINER="nvcr.io/r2kuatviomfd/nemo-rl-release:latest"
+# CONTAINER="/lustre/fsw/portfolios/coreai/users/shuangy/images/nemo-rl-main-250825.sqsh"
+# CONTAINER="/lustre/fsw/portfolios/coreai/users/larkz/docker_images/nemorl.sqsh"
+CONTAINER="nvcr.io/r2kuatviomfd/internal-sandbox/nemo-rl-ngc:0919"
+
+
+MOUNTS=""
+current_dir=$(pwd)
+MOUNTS+="${current_dir}/..:/apps"
+
+current_time=$(date +"%Y%m%d_%H%M")
+WBPROJECT=verl_${current_time}
+echo $WBPROJECT
+
+# Necessary Exports
+export HYDRA_FULL_ERROR=1
+#export TRANSFORMERS_OFFLINE=1
+export NCCL_AVOID_RECORD_STREAMS=1
+#export ENROOT_ROOTFS_WRITABLE=1
+
+# && ray start --head --node-ip-address 0.0.0.0 --num-gpus 8 \
+# && sh examples/scripts/train_distill_grpo_ray_hybrid_engine.sh
+
+
+read -r -d '' cmd <<EOF
+echo "*******STARTING********" \
+&& echo "---------------" \
+&& echo "Starting training" \
+&& CUDA_DEVICE_MAX_CONNECTIONS=1 CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7 \
+&& nvidia-smi \
+&& export WANDB_API_KEY=149737fd3c4537b349a37aab90b6fff96f385ebc \
+&& cd /apps/RL/ \
+&& uv run examples/run_grpo_math.py --config examples/configs/recipes/llm/grpo-qwen3-8b-1n8g-megatron-fp8-dapo.yaml
+EOF
+
+
+# --container-save=/lustre/fsw/general_sa/larkz/docker_images/verl.sqsh
+# --container-save=/lustre/fsw/portfolios/coreai/users/larkz/dockers/nemorl.sqsh
+# srun --container-image ${CONTAINER} --container-name ${WBPROJECT} --container-save=/lustre/fsw/portfolios/coreai/users/larkz/dockers/nemorl_0918.sqsh --no-container-mount-home --container-mounts ${MOUNTS} bash -c "${cmd}"
+
+srun --container-image ${CONTAINER} --container-name ${WBPROJECT} --no-container-mount-home --container-mounts ${MOUNTS} bash -c "${cmd}"
+
+set +x

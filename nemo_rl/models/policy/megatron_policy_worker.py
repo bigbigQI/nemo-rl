@@ -599,6 +599,14 @@ class MegatronPolicyWorker:
                 model_cfg.fp8 = fp8_cfg["fp8"]
                 model_cfg.fp8_recipe = fp8_cfg["fp8_recipe"]
                 model_cfg.fp8_param = fp8_cfg["fp8_param"]
+                # 添加对first/last layers BF16参数的支持
+                model_cfg.first_last_layers_bf16 = fp8_cfg.get("first_last_layers_bf16", False)
+                model_cfg.num_layers_at_start_in_bf16 = fp8_cfg.get("num_layers_at_start_in_bf16", 1)
+                model_cfg.num_layers_at_end_in_bf16 = fp8_cfg.get("num_layers_at_end_in_bf16", 1)
+
+                print(f"[lark] model_cfg.first_last_layers_bf16: {model_cfg.first_last_layers_bf16}")
+                print(f"[lark] model_cfg.num_layers_at_start_in_bf16: {model_cfg.num_layers_at_start_in_bf16}")
+                print(f"[lark] model_cfg.num_layers_at_end_in_bf16: {model_cfg.num_layers_at_end_in_bf16}")
             except KeyError as e:
                 raise KeyError(f"Missing key in fp8_cfg: {e}")
 
@@ -823,6 +831,82 @@ class MegatronPolicyWorker:
     def is_alive(self):
         return True
 
+    def _apply_icepop_token_filtering(self, batch_data: BatchedDataDict) -> None:
+        """Apply ICEPOP filtering to token mask based on importance weights.
+        
+        This function filters tokens based on importance weights computed from logprob differences.
+        Tokens with importance weights outside the [icepop_min, icepop_max] range are filtered out
+        by setting their corresponding token_mask values to 0.
+        
+        Args:
+            batch_data: BatchedDataDict containing token_mask, prev_logprobs, generation_logprobs
+        """
+        icepop_min = self.cfg.get("icepop_min", 0.8)
+        icepop_max = self.cfg.get("icepop_max", 1.2)
+        sequence_level = self.cfg.get("sequence_level_importance_ratios", False)
+        
+        prev_logprobs = batch_data["prev_logprobs"]
+        generation_logprobs = batch_data["generation_logprobs"]
+        original_token_mask = batch_data["token_mask"]
+        
+        # print(f"[lark log]: ICEPOP filtering - icepop_min: {icepop_min}, icepop_max: {icepop_max}")
+        # print(f"[lark log]: ICEPOP filtering - sequence_level: {sequence_level}")
+        # print(f"[lark log]: ICEPOP filtering - prev_logprobs.shape: {prev_logprobs.shape}")
+        # print(f"[lark log]: ICEPOP filtering - generation_logprobs.shape: {generation_logprobs.shape}")
+        # print(f"[lark log]: ICEPOP filtering - original_token_mask.shape: {original_token_mask.shape}")
+        
+        batch_size, seq_len = prev_logprobs.shape
+        
+        with torch.no_grad():
+            if sequence_level:
+                # Sequence-level: compute importance weights per sequence, then broadcast
+                seq_lp_diff = ((prev_logprobs - generation_logprobs) * original_token_mask).sum(dim=-1)
+                actor_importance_weights = torch.exp(seq_lp_diff).clamp(min=1e-8, max=1e8)
+                
+                # print(f"[lark log]: ICEPOP filtering - seq_lp_diff range: [{seq_lp_diff.min():.6f}, {seq_lp_diff.max():.6f}]")
+                # print(f"[lark log]: ICEPOP filtering - actor_importance_weights range: [{actor_importance_weights.min():.6f}, {actor_importance_weights.max():.6f}]")
+                
+                icepop_mask = (
+                    (actor_importance_weights >= icepop_min) & 
+                    (actor_importance_weights <= icepop_max)
+                ).unsqueeze(-1).expand(-1, seq_len)
+            else:
+                # Token-level: compute importance weights per token
+                actor_importance_weights = torch.exp(prev_logprobs - generation_logprobs).clamp(min=1e-8, max=1e8)
+                
+                # print(f"[lark log]: ICEPOP filtering - actor_importance_weights range: [{actor_importance_weights.min():.6f}, {actor_importance_weights.max():.6f}]")
+                
+                # Create token-level mask
+                icepop_mask = (actor_importance_weights >= icepop_min) & (actor_importance_weights <= icepop_max)
+            
+            # Count tokens before and after filtering for logging
+            tokens_before = (original_token_mask != 0).sum().item()
+            tokens_after_icepop = icepop_mask.sum().item()
+            
+            # Apply ICEPOP filtering: keep only tokens that pass both original mask and ICEPOP criteria
+            intersection_mask = (original_token_mask != 0) & icepop_mask
+            filtered_token_mask = torch.where(
+                intersection_mask, 
+                original_token_mask, 
+                torch.zeros_like(original_token_mask)
+            )
+            
+            tokens_after_intersection = (filtered_token_mask != 0).sum().item()
+            
+            # print(f"[lark log]: ICEPOP filtering - tokens before: {tokens_before}")
+            # print(f"[lark log]: ICEPOP filtering - tokens passing ICEPOP: {tokens_after_icepop}")
+            # print(f"[lark log]: ICEPOP filtering - tokens after intersection: {tokens_after_intersection}")
+            
+            if tokens_before > 0:
+                filtering_ratio = tokens_after_intersection / tokens_before
+                # print(f"[lark log]: ICEPOP filtering - filtering ratio: {filtering_ratio:.4f}")
+            else:
+                pass
+                # print("[lark log]: ICEPOP filtering - no tokens to filter")
+            
+            # Update the token mask in the batch data
+            batch_data["token_mask"] = filtered_token_mask
+
     def reset_peak_memory_stats(self) -> None:
         torch.cuda.reset_peak_memory_stats()
 
@@ -864,6 +948,11 @@ class MegatronPolicyWorker:
         if mbs is None:
             mbs = self.cfg["train_micro_batch_size"]
         local_gbs = gbs // self.dp_size
+
+        # print("[lark log]: gbs: ", gbs)
+        # print("[lark log]: mbs: ", mbs)
+        # print("[lark log]: local_gbs: ", local_gbs)
+        # print("[lark log]: data.size: ", data.size)
         total_dataset_size = torch.tensor(data.size, device="cuda")
         torch.distributed.all_reduce(
             total_dataset_size,
@@ -871,6 +960,8 @@ class MegatronPolicyWorker:
             group=parallel_state.get_data_parallel_group(),
         )
         num_global_batches = int(total_dataset_size.item()) // gbs
+        # print("[lark log]: total_dataset_size: ", total_dataset_size)
+        # print("[lark log]: num_global_batches: ", num_global_batches)
 
         if eval_mode:
             ctx: AbstractContextManager[Any] = torch.no_grad()
@@ -898,9 +989,19 @@ class MegatronPolicyWorker:
             for gb_idx in range(num_global_batches):
                 global_batch = data.get_batch(batch_idx=gb_idx, batch_size=local_gbs)
 
+                # print("[lark log]: global_batch.size: ", global_batch.size)
+                # print("[lark log]: global_batch.sample_mask.shape: ", global_batch["sample_mask"].shape)
+                # print("[lark log]: global_batch.input_ids.shape: ", global_batch["input_ids"].shape)
+                # print("[lark log]: global_batch.token_mask.shape: ", global_batch["token_mask"].shape)
+
                 assert "sample_mask" in global_batch, (
                     "sample_mask must be present in the data!"
                 )
+                use_icepop_fixed = self.cfg.get("use_icepop_fixed", False)
+                if use_icepop_fixed:
+                    # print("[lark log]: using icepop fixed")
+                    self._apply_icepop_token_filtering(global_batch)
+                
                 ## get the normalization factor for the loss
                 local_valid_seqs = torch.sum(global_batch["sample_mask"])
 
@@ -1029,10 +1130,15 @@ class MegatronPolicyWorker:
                     # keep all microbatch metrics to be normalized later
                     gb_loss_metrics = []
                     mb_losses = []
+                    # print("[lark log]: parallel_state.is_pipeline_last_stage(ignore_virtual=True): ", parallel_state.is_pipeline_last_stage(ignore_virtual=True))
+                    # print("[lark log]: num_global_batches: ", num_global_batches)
                     for x in losses_reduced:
                         loss_metrics = {}
                         for k in x.keys():
-                            loss_metrics[k] = x[k] / num_global_batches
+                            if k not in ["importance_weights_before_icepop_max", "importance_weights_before_icepop_min", "importance_weights_after_icepop_max", "importance_weights_after_icepop_min"]:
+                                loss_metrics[k] = x[k] / num_global_batches
+                            else:
+                                loss_metrics[k] = x[k]
                         gb_loss_metrics.append(loss_metrics)
                         curr_lr = self.scheduler.get_lr(self.optimizer.param_groups[0])
                         curr_wd = self.scheduler.get_wd()
@@ -1855,6 +1961,9 @@ class MegatronPolicyWorker:
             weights_path: The specific directory path where the checkpoint will be saved.
             optimizer_path: If not None, optimizer and scheduler states are saved if they exist.
         """
+        allocated = torch.cuda.memory_allocated() / (1024**3)  # Convert to GB
+        reserved = torch.cuda.memory_reserved() / (1024**3)  # Convert to GB
+        print(f"[SHARON] GPU Memory before saving checkpoint: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved")
         if not torch.distributed.is_initialized():
             raise RuntimeError(
                 "Distributed process group is not initialized. Cannot save checkpoint."
@@ -1915,12 +2024,112 @@ class MegatronPolicyWorker:
 
             if not is_training:  # Restore training state if it was changed
                 self.model.train()
+            
+            # Move optimizaer states to cpu
+            torch.randn(1).cuda()  # wake up torch allocator
+            if hasattr(self, "optimizer") and self.optimizer is not None:
+                # Iterate through the state dictionaries for each parameter group
+                if isinstance(self.optimizer, ChainedOptimizer):
+                    optimizer_state = self.optimizer.state
+                else:
+                    optimizer_state = self.optimizer._get_state()
+                for _, state in optimizer_state.items():
+                    # Iterate through the state items (e.g., momentum, variance) for a parameter
+                    for k, v in state.items():
+                        # Check if the item is a tensor and on the GPU
+                        if torch.is_tensor(v) and v.is_cuda:
+                            # Move the tensor to CPU and update the state dictionary
+                            state[k] = v.to("cpu")
+
+            gc.collect()
+            torch.cuda.empty_cache()
+
+            allocated = torch.cuda.memory_allocated() / (1024**3)  # Convert to GB
+            reserved = torch.cuda.memory_reserved() / (1024**3)  # Convert to GB
+            print(f"[SHARON] GPU Memory after saving checkpoint: {allocated:.2f}GB allocated, {reserved:.2f}GB reserved")
+
 
         except Exception as e:
             print(f"Failed to save checkpoint to {weights_path}: {e}")
             raise
         finally:
             self.mcore_state.cfg.checkpoint.save = original_save_path
+
+    # def save_checkpoint(
+    #     self,
+    #     weights_path: str,
+    #     optimizer_path: Optional[str] = None,
+    #     **kwargs,
+    # ):
+    #     """Save a training checkpoint.
+
+    #     Args:
+    #         weights_path: The specific directory path where the checkpoint will be saved.
+    #         optimizer_path: If not None, optimizer and scheduler states are saved if they exist.
+    #     """
+    #     if not torch.distributed.is_initialized():
+    #         raise RuntimeError(
+    #             "Distributed process group is not initialized. Cannot save checkpoint."
+    #         )
+
+    #     if self.mcore_state is None or self.model is None:
+    #         raise RuntimeError(
+    #             "Megatron core state or model is not initialized. Cannot save checkpoint."
+    #         )
+
+    #     original_save_path = self.mcore_state.cfg.checkpoint_config.save
+    #     # save_dir = os.path.dirname(weights_path)
+    #     release_name = os.path.basename(weights_path)
+
+    #     try:
+    #         maybe_finalize_async_save(
+    #             ckpt_cfg=self.mcore_state.cfg.checkpoint_config, blocking=False
+    #         )
+    #         self.mcore_state.cfg.checkpoint_config.save = weights_path
+
+    #         optimizer_to_save = None
+    #         scheduler_to_save = None
+
+    #         if optimizer_path is not None:
+    #             if self.optimizer is not None:
+    #                 optimizer_to_save = self.optimizer
+    #             if self.scheduler is not None:
+    #                 scheduler_to_save = self.scheduler
+
+    #         # Ensure model is in eval mode for consistent saving, unless actively training
+    #         # This is a common practice, though NeMo's save might handle this.
+    #         # For safety, if not in training loop, setting to eval.
+    #         is_training = self.model.training
+    #         if not is_training:
+    #             self.model.eval()
+
+    #         if self.should_disable_forward_pre_hook:
+    #             self.disable_forward_pre_hook()
+    #         save_checkpoint(
+    #             state=self.mcore_state,
+    #             model=[self.model],
+    #             optimizer=optimizer_to_save,
+    #             opt_param_scheduler=scheduler_to_save,
+    #             num_floating_point_operations_so_far=self.mcore_state.train_state.floating_point_operations_so_far,
+    #             checkpointing_context=self.checkpointing_context,
+    #         )
+    #         print(f"Saved checkpoint to {weights_path}")
+    #         maybe_finalize_async_save(
+    #             ckpt_cfg=self.mcore_state.cfg.checkpoint_config,
+    #             blocking=True,
+    #             terminate=True,
+    #         )
+    #         if self.should_disable_forward_pre_hook:
+    #             self.enable_forward_pre_hook()
+
+    #         if not is_training:  # Restore training state if it was changed
+    #             self.model.train()
+
+    #     except Exception as e:
+    #         print(f"Failed to save checkpoint to {weights_path}: {e}")
+    #         raise
+    #     finally:
+    #         self.mcore_state.cfg.checkpoint_config.save = original_save_path
 
     def load_checkpoint(self, weights_path: str, optimizer_path: Optional[str] = None):
         """Load a training checkpoint.

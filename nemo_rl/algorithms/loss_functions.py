@@ -42,6 +42,12 @@ class ClippedPGLossConfig(TypedDict):
     # If False (default), correction is applied at the token level as in the
     # original GRPO paper.
     sequence_level_importance_ratios: NotRequired[bool]
+    # ICEPOP (Importance Clipping Enhancement for Policy Optimization) parameters
+    # If True, filter importance weights to be within [icepop_min, icepop_max]
+    # use_icepop: NotRequired[bool]
+    # icepop_min: NotRequired[float]
+    # icepop_max: NotRequired[float]
+    # use_icepop_fixed: NotRequired[bool]
 
 
 class ClippedPGLossDataDict(TypedDict):
@@ -112,6 +118,18 @@ class ClippedPGLossFn(LossFunction):
             "sequence_level_importance_ratios",
             False,
         )
+        # # ICEPOP parameters
+        # self.use_icepop = cfg.get("use_icepop", False)
+        # self.icepop_min = cfg.get("icepop_min", 0.0)
+        # self.icepop_max = cfg.get("icepop_max", float('inf'))
+        # self.use_icepop_fixed = cfg.get("use_icepop_fixed", False)
+
+        # self.print_is_log = cfg.get("print_is_log", False)
+
+        # print("[lark log]: use_icepop: ", self.use_icepop)
+        # print("[lark log]: icepop_min: ", self.icepop_min)
+        # print("[lark log]: icepop_max: ", self.icepop_max)
+        # print("[lark log]: use_icepop_fixed: ", self.use_icepop_fixed)
         self.loss_type = (
             LossType.TOKEN_LEVEL if cfg["token_level_loss"] else LossType.SEQUENCE_LEVEL
         )
@@ -279,6 +297,35 @@ class ClippedPGLossFn(LossFunction):
             importance_weights_to_use = actor_importance_weights
         else:
             importance_weights_to_use = torch.ones_like(prev_logprobs)
+            
+        # importance_weights_before_icepop = importance_weights_to_use.clone()
+        
+        # # ICEPOP filtering: set out-of-range importance weights to 0
+        # if self.use_icepop and self.use_importance_sampling_correction:
+        #     icepop_mask = (importance_weights_to_use >= self.icepop_min) & (importance_weights_to_use <= self.icepop_max)
+        #     importance_weights_to_use = torch.where(icepop_mask, importance_weights_to_use, torch.zeros_like(importance_weights_to_use))
+
+        # if self.print_is_log:
+        #     print("[lark log]: importance_weights_before_icepop.shape: ", importance_weights_before_icepop.shape)
+        #     print("[lark log]: importance_weights_to_use.shape: ", importance_weights_to_use.shape)
+        #     print("[lark log]: mask.shape: ", mask.shape)
+        #     print("[lark log]: global_valide_toks: ", global_valid_toks)
+        #     importance_weights_before_icepop_masked = importance_weights_before_icepop * mask
+        #     importance_weights_to_use_masked = importance_weights_to_use * mask
+            
+        #     importance_weights_before_icepop_np = importance_weights_before_icepop_masked.cpu().numpy()
+        #     importance_weights_to_use_np = importance_weights_to_use_masked.cpu().numpy()
+
+            # import os
+            # import uuid
+            # os.makedirs("log_data_importance_weights_fp8_step12", exist_ok=True)
+            # unique_suffix = uuid.uuid4().hex
+            # before_icepop_filename = f"log_data_importance_weights_fp8_step12/importance_weights_before_icepop_{unique_suffix}.bin"
+            # to_use_filename = f"log_data_importance_weights_fp8_step12/importance_weights_to_use_{unique_suffix}.bin"
+            # with open(before_icepop_filename, "wb") as f:
+            #     f.write(importance_weights_before_icepop_np.tobytes())
+            # with open(to_use_filename, "wb") as f:
+            #     f.write(importance_weights_to_use_np.tobytes())
 
         if self.loss_type == LossType.TOKEN_LEVEL:
             actor_loss = masked_mean(
@@ -320,6 +367,45 @@ class ClippedPGLossFn(LossFunction):
                 mask,
                 global_normalization_factor=global_valid_toks,
             )
+            
+            # if self.use_icepop and self.use_importance_sampling_correction:
+            #     # Calculate fraction filtered as tokens where importance_weights_to_use is 0
+            #     icepop_fraction_filtered = masked_mean(
+            #         (importance_weights_to_use == 0.0).float(),
+            #         mask,
+            #         global_normalization_factor=global_valid_toks,
+            #     )
+            #     def get_masked_max_min(tensor, mask):
+            #         valid = torch.masked_select(tensor, mask.bool())
+            #         nonzero_valid = valid[valid != 0]
+            #         if nonzero_valid.numel() > 0:
+            #             max_val = nonzero_valid.amax()
+            #             min_val = nonzero_valid.amin()
+            #         else:
+            #             max_val = tensor.new_tensor(0.0)
+            #             min_val = tensor.new_tensor(0.0)
+            #         return max_val, min_val
+
+            #     importance_weights_before_icepop_max, importance_weights_before_icepop_min = \
+            #         get_masked_max_min(importance_weights_before_icepop, mask)
+
+            #     importance_weights_after_icepop_max, importance_weights_after_icepop_min = \
+            #         get_masked_max_min(importance_weights_to_use, mask)
+
+            # if self.use_icepop_fixed and self.use_importance_sampling_correction:
+            #     def get_masked_max_min(tensor, mask):
+            #         valid = torch.masked_select(tensor, mask.bool())
+            #         nonzero_valid = valid[valid != 0]
+            #         if nonzero_valid.numel() > 0:
+            #             max_val = nonzero_valid.amax()
+            #             min_val = nonzero_valid.amin()
+            #         else:
+            #             max_val = tensor.new_tensor(0.0)
+            #             min_val = tensor.new_tensor(0.0)
+            #         return max_val, min_val
+            #     importance_weights_after_icepop_max, importance_weights_after_icepop_min = \
+            #         get_masked_max_min(importance_weights_to_use, mask)
+            
 
         loss = actor_loss + kl
         with torch.no_grad():
@@ -337,19 +423,30 @@ class ClippedPGLossFn(LossFunction):
         # If you provided a global_valid_{seqs/toks}, all metrics here are globally normalized
         # by either sequence or token count, depending on particular metric.
         # To get the true metric, you'll need to sum over the microbatch.
-        return (
-            loss,
-            {
-                "loss": loss.item(),
-                "probs_ratio": probs_ratio,
-                "probs_ratio_clamped": probs_ratio_clamped,
-                "kl_penalty": kl.item() / self.reference_policy_kl_penalty if kl else 0,
-                "token_mult_prob_error": mult_prob_error,
-                "sampling_importance_ratio": sample_importance_ratio.item(),
-                "num_valid_samples": sample_mask.sum().item(),
-                "approx_entropy": seq_entropy_approx.item(),
-            },
-        )
+        metrics = {
+            "loss": loss.item(),
+            "probs_ratio": probs_ratio,
+            "probs_ratio_clamped": probs_ratio_clamped,
+            "kl_penalty": kl.item() / self.reference_policy_kl_penalty if kl else 0,
+            "token_mult_prob_error": mult_prob_error,
+            "sampling_importance_ratio": sample_importance_ratio.item(),
+            "num_valid_samples": sample_mask.sum().item(),
+            "approx_entropy": seq_entropy_approx.item(),
+        }
+        
+        # # Add ICEPOP metrics if enabled
+        # if self.use_icepop and self.use_importance_sampling_correction:
+        #     metrics["icepop_fraction_filtered"] = icepop_fraction_filtered.item()
+        #     metrics["importance_weights_before_icepop_max"] = importance_weights_before_icepop_max.item()
+        #     metrics["importance_weights_before_icepop_min"] = importance_weights_before_icepop_min.item()
+        #     metrics["importance_weights_after_icepop_max"] = importance_weights_after_icepop_max.item()
+        #     metrics["importance_weights_after_icepop_min"] = importance_weights_after_icepop_min.item()
+
+        # if self.use_icepop_fixed and self.use_importance_sampling_correction:
+        #     metrics["importance_weights_after_icepop_max"] = importance_weights_after_icepop_max.item()
+        #     metrics["importance_weights_after_icepop_min"] = importance_weights_after_icepop_min.item()
+            
+        return loss, metrics
 
 
 class NLLLoss(LossFunction):
@@ -777,6 +874,17 @@ class SequencePackingLossWrapper:
 
         loss_accum = 0
         metrics_accum = {}
+        
+        # Define ICEPOP metrics that need special handling
+        icepop_max_metrics = {
+            "importance_weights_before_icepop_max",
+            "importance_weights_after_icepop_max"
+        }
+        icepop_min_metrics = {
+            "importance_weights_before_icepop_min", 
+            "importance_weights_after_icepop_min"
+        }
+        
         for seq_idx in range(len(seq_starts)):
             seq_start = seq_starts[seq_idx].item()
             seq_end = seq_ends[seq_idx].item()
@@ -814,7 +922,15 @@ class SequencePackingLossWrapper:
             loss_accum += loss
             for k, v in metrics.items():
                 if k not in metrics_accum:
-                    metrics_accum[k] = 0
-                metrics_accum[k] += v
+                    metrics_accum[k] = v
+                elif k in icepop_max_metrics:
+                    # For max metrics, take the maximum across sequences
+                    metrics_accum[k] = max(metrics_accum[k], v)
+                elif k in icepop_min_metrics:
+                    # For min metrics, take the minimum across sequences
+                    metrics_accum[k] = min(metrics_accum[k], v)
+                else:
+                    # For all other metrics, sum them
+                    metrics_accum[k] += v
 
         return loss_accum, metrics_accum

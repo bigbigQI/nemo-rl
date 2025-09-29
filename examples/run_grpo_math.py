@@ -18,6 +18,9 @@ import pprint
 from collections import defaultdict
 from typing import Any, Optional
 
+import sys
+sys.path.insert(0, "/apps/RL")
+
 from omegaconf import OmegaConf
 from transformers import PreTrainedTokenizerBase
 
@@ -26,6 +29,7 @@ from nemo_rl.algorithms.utils import get_tokenizer
 from nemo_rl.data import DataConfig
 from nemo_rl.data.datasets import AllTaskProcessedDataset
 from nemo_rl.data.hf_datasets.deepscaler import DeepScalerDataset
+from nemo_rl.data.hf_datasets.dapo import DAPODataset
 from nemo_rl.data.hf_datasets.openmathinstruct2 import OpenMathInstruct2Dataset
 from nemo_rl.data.interfaces import (
     DatumSpec,
@@ -147,6 +151,9 @@ def setup_data(
             "Loading agentica-org/DeepScaleR-Preview-Dataset for training and validation"
         )
         data: Any = DeepScalerDataset(seed=seed)
+    elif data_config["dataset_name"] == "DAPO":
+        print("Loading BytedTsinghua-SIA/DAPO-Math-17k for training and validation")
+        data: Any = DAPODataset(seed=seed)
     else:
         raise ValueError(f"No processor for dataset {data_config['dataset_name']}.")
 

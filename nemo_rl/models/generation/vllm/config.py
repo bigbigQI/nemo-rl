@@ -29,6 +29,8 @@ class VllmSpecificArgs(TypedDict):
     load_format: NotRequired[str]
     precision: NotRequired[str]
     enforce_eager: NotRequired[bool]
+    # FP8 KV Cache configuration
+    fp8_kv_cache: NotRequired[bool]
 
 
 class VllmConfig(GenerationConfig):
