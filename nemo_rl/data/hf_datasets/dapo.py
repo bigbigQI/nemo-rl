@@ -20,6 +20,9 @@ from datasets import Dataset, load_dataset
 from nemo_rl.data.interfaces import TaskDataSpec
 
 
+front_prompt = "Solve the following math problem step by step. The last line of your response should be of the form Answer: $Answer (without quotes) where $Answer is the answer to the problem.\n\n"
+back_prompt = "\n\nRemember to put your answer on its own line after \"Answer:\"."
+
 def format_math(data: dict[str, str | float | int]) -> dict[str, list[Any] | str]:
     return {
         "messages": [
@@ -29,7 +32,7 @@ def format_math(data: dict[str, str | float | int]) -> dict[str, list[Any] | str
             },
             {
                 "role": "assistant",
-                "content": data["answer"],
+                "content": str(data["answer"]),
             },
         ],
         # For v0.1 release, nemo rl datasets require a task_name key such that user can map a task processor per unique task.
@@ -81,7 +84,7 @@ def prepare_dapo_dataset(seed: int = 42) -> dict[str, Dataset | None]:
 
     # Compute accuracy 16 times per sample (matching the DeepScaleR evaluation setting)
     val_repeated = []
-    for _ in range(16):
+    for _ in range(8):
         val_repeated.extend(val_formatted)
     val_formatted = val_formatted.from_list(val_repeated)
 

@@ -423,6 +423,11 @@ class Policy(ColocatablePolicyInterface, GenerationInterface):
             for k, v in r["all_mb_metrics"].items():
                 all_mb_metrics[k].extend(v)
         aggregated_results["all_mb_metrics"] = dict(all_mb_metrics)
+        
+        # ICEPOP metrics are scalar values that are already synchronized across all workers,
+        # so we just take the first worker's result
+        if "icepop_metrics" in results[0]:
+            aggregated_results["icepop_metrics"] = results[0]["icepop_metrics"]
 
         return aggregated_results
 

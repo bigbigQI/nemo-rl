@@ -1,9 +1,9 @@
 grpo:
-  num_prompts_per_step: 16
-  num_generations_per_prompt: 8
+  num_prompts_per_step: 256
+  num_generations_per_prompt: 16
   max_rollout_turns: 1
-  max_num_epochs: 1
-  max_num_steps: 10
+  max_num_epochs: 10
+  max_num_steps: 1000
   normalize_rewards: true
   use_leave_one_out_baseline: true
   val_period: 10
@@ -18,13 +18,11 @@ loss_fn:
   ratio_clip_max: 0.28
   ratio_clip_c: null
   use_on_policy_kl_approximation: false
-  use_importance_sampling_correction: True
-  use_icepop: False
-  print_is_log: False
+  use_importance_sampling_correction: true
   token_level_loss: true
 checkpointing:
   enabled: true
-  checkpoint_dir: results/grpo-qwen3-8b-1n8g-megatron-fp8-dapo-icepop-min-0.7-max-1.3-test
+  checkpoint_dir: results/grpo-qwen3-8b-2n8g-megatron-fp8-icepop
   metric_name: val_reward
   higher_is_better: true
   keep_top_k: 3
@@ -34,17 +32,17 @@ policy:
   model_name: /apps/models/Qwen3-8B-Base
   tokenizer:
     name: /apps/models/Qwen3-8B-Base
-  train_global_batch_size: 16
+  train_global_batch_size: 256
   train_micro_batch_size: 1
-  generation_batch_size: 4
+  generation_batch_size: 32
   logprob_batch_size: 2
-  max_total_sequence_length: 8192
+  max_total_sequence_length: 16384
   precision: bfloat16
   make_sequence_length_divisible_by: 1
   max_grad_norm: 1
   use_icepop_fixed: True
   icepop_min: 0.5
-  icepop_max: 1.5
+  icepop_max: 2.0
 
   dtensor_cfg:
     enabled: False
@@ -62,8 +60,8 @@ policy:
   megatron_cfg:
     enabled: True
     empty_unused_memory_level: 1
-    tensor_model_parallel_size: 1
-    pipeline_model_parallel_size: 2
+    tensor_model_parallel_size: 2
+    pipeline_model_parallel_size: 1
     context_parallel_size: 1
     expert_tensor_parallel_size: 1
     expert_model_parallel_size: 1
@@ -104,7 +102,7 @@ policy:
       weight_decay_incr_style: "constant"
       lr_decay_style: "constant"
       lr_decay_iters: null
-      lr_warmup_iters: 0
+      lr_warmup_iters: 2
       lr_warmup_init: 5.0e-8
 
     distributed_data_parallel_config:
@@ -117,7 +115,7 @@ policy:
 
   generation:
     backend: vllm
-    max_new_tokens: 8192
+    max_new_tokens: 16384
     temperature: 1
     top_p: 1
     top_k: null
@@ -126,13 +124,13 @@ policy:
     vllm_cfg:
       async_engine: false
       precision: 'fp8'
-      tensor_parallel_size: 1
+      tensor_parallel_size: 2
       pipeline_parallel_size: 1
       enable_expert_parallel: false
-      gpu_memory_utilization: 0.6
-      max_model_len: 8192
+      gpu_memory_utilization: 0.7
+      max_model_len: 16384
       enforce_eager: False
-      use_deep_gemm: False
+      use_deep_gemm: True
       num_last_layers_in_bf16: 0
       num_first_layers_in_bf16: 0
     colocated:
@@ -141,7 +139,7 @@ policy:
         gpus_per_node: null
         num_nodes: null
 data:
-  max_input_seq_length: 8192
+  max_input_seq_length: 16384
   prompt_file: examples/prompts/cot.txt
   system_prompt_file: null
   dataset_name: DAPO
@@ -150,19 +148,19 @@ env:
   math:
     num_workers: 8
 logger:
-  log_dir: logs/grpo-qwen3-8b-1n8g-megatron-fp8-dapo-icepop-min-0.7-max-1.3-test
+  log_dir: logs/grpo-qwen3-8b-2n8g-megatron-fp8-icepop
   num_val_samples_to_print: 0
   wandb_enabled: true
   tensorboard_enabled: true
   mlflow_enabled: false
   monitor_gpus: true
   wandb:
-    project: nemo-rl
-    name: grpo-qwen3-8b-1n8g-megatron-fp8-dapo-icepop-min-0.7-max-1.3-test
+    project: nemo-rl-qwen3
+    name: grpo-qwen3-8b-2n8g-megatron-fp8-icepop
   tensorboard: {}
   gpu_monitoring:
     collection_interval: 10
     flush_interval: 10
 cluster:
   gpus_per_node: 8
-  num_nodes: 1
+  num_nodes: 2

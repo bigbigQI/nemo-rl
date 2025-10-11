@@ -850,16 +850,17 @@ class MegatronPolicyWorker:
         icepop_min = self.cfg.get("icepop_min", 0.8)
         icepop_max = self.cfg.get("icepop_max", 1.2)
         sequence_level = self.cfg.get("sequence_level_importance_ratios", False)
-        
+        print_log = self.cfg.get("print_log", False)
         prev_logprobs = batch_data["prev_logprobs"]
         generation_logprobs = batch_data["generation_logprobs"]
         original_token_mask = batch_data["token_mask"]
         
-        # print(f"[lark log]: ICEPOP filtering - icepop_min: {icepop_min}, icepop_max: {icepop_max}")
-        # print(f"[lark log]: ICEPOP filtering - sequence_level: {sequence_level}")
-        # print(f"[lark log]: ICEPOP filtering - prev_logprobs.shape: {prev_logprobs.shape}")
-        # print(f"[lark log]: ICEPOP filtering - generation_logprobs.shape: {generation_logprobs.shape}")
-        # print(f"[lark log]: ICEPOP filtering - original_token_mask.shape: {original_token_mask.shape}")
+        if print_log:
+            print(f"[lark log]: ICEPOP filtering - icepop_min: {icepop_min}, icepop_max: {icepop_max}")
+            print(f"[lark log]: ICEPOP filtering - sequence_level: {sequence_level}")
+            print(f"[lark log]: ICEPOP filtering - prev_logprobs.shape: {prev_logprobs.shape}")
+            print(f"[lark log]: ICEPOP filtering - generation_logprobs.shape: {generation_logprobs.shape}")
+            print(f"[lark log]: ICEPOP filtering - original_token_mask.shape: {original_token_mask.shape}")
         
         batch_size, seq_len = prev_logprobs.shape
         
@@ -888,7 +889,10 @@ class MegatronPolicyWorker:
                     importance_weights_after_min = 0.0
             else:
                 # Token-level: compute importance weights per token
-                actor_importance_weights = torch.exp(prev_logprobs - generation_logprobs).clamp(min=1e-8, max=1e8)
+                actor_importance_weights = torch.exp(prev_logprobs - generation_logprobs)
+                actor_importance_weights = torch.nan_to_num(
+                actor_importance_weights, nan=0.0, posinf=0.0, neginf=0.0
+            )
                 
                 # Calculate importance weights statistics before filtering (only for valid tokens)
                 valid_importance_weights = actor_importance_weights[original_token_mask != 0]
@@ -915,24 +919,49 @@ class MegatronPolicyWorker:
             # Count tokens before and after filtering for logging
             tokens_before = (original_token_mask != 0).sum().item()            
             # Apply ICEPOP filtering: keep only tokens that pass both original mask and ICEPOP criteria
-            intersection_mask = (original_token_mask != 0) & icepop_mask
+            final_valid_mask = (original_token_mask != 0) & icepop_mask
             filtered_token_mask = torch.where(
-                intersection_mask, 
+                final_valid_mask, 
                 original_token_mask, 
                 torch.zeros_like(original_token_mask)
             )
             
-            tokens_after_intersection = (filtered_token_mask != 0).sum().item()
+            tokens_after_final_valid = (filtered_token_mask != 0).sum().item()
             
-            token_filtering_ratio = tokens_after_intersection / tokens_before if tokens_before > 0 else 1.0
+            token_filtering_ratio = tokens_after_final_valid / tokens_before if tokens_before > 0 else 1.0
             
             # Update the token mask in the batch data
             batch_data["token_mask"] = filtered_token_mask
+
+            # Print mean of actor_importance_weights BEFORE ICEPOP filtering (only at original valid token positions)
+            original_valid_mask = (original_token_mask != 0)
+            if original_valid_mask.any():
+                importance_weights_before_mean = actor_importance_weights[original_valid_mask].mean().item()
+                print(f"[lark log]: ICEPOP filtering - actor_importance_weights mean BEFORE filtering (at original valid tokens): {importance_weights_before_mean}")
+            else:
+                print("[lark log]: ICEPOP filtering - actor_importance_weights mean BEFORE filtering: N/A (no valid tokens)")
+            
+            # Print mean of actor_importance_weights AFTER ICEPOP filtering (at final_valid_mask positions)
+            if final_valid_mask.any():
+                importance_weights_after_mean = actor_importance_weights[final_valid_mask].mean().item()
+                print(f"[lark log]: ICEPOP filtering - actor_importance_weights mean AFTER filtering (at final_valid_mask): {importance_weights_after_mean}")
+            else:
+                print("[lark log]: ICEPOP filtering - actor_importance_weights mean AFTER filtering: N/A (no valid tokens)")
+
+            
+            if print_log:
+                print("[lark log]: ICEPOP filtering - tokens_before: ", tokens_before)
+                print("[lark log]: ICEPOP filtering - tokens_after_final_valid: ", tokens_after_final_valid)
+                print("[lark log]: ICEPOP filtering - token_filtering_ratio: ", token_filtering_ratio)
+                print("[lark log]: ICEPOP filtering - importance_weights_before_max: ", importance_weights_before_max)
+                print("[lark log]: ICEPOP filtering - importance_weights_before_min: ", importance_weights_before_min)
+                print("[lark log]: ICEPOP filtering - importance_weights_after_max: ", importance_weights_after_max)
+                print("[lark log]: ICEPOP filtering - iqmportance_weights_after_min: ", importance_weights_after_min)
             
             # Return metrics for logging
             return {
                 "icepop_tokens_before": float(tokens_before),
-                "icepop_tokens_after": float(tokens_after_intersection),
+                "icepop_tokens_after": float(tokens_after_final_valid),
                 "icepop_filtering_ratio": token_filtering_ratio,
                 "importance_weights_before_max": importance_weights_before_max,
                 "importance_weights_before_min": importance_weights_before_min,
@@ -1302,10 +1331,11 @@ class MegatronPolicyWorker:
             "grad_norm": torch.tensor(
                 mb_metrics["grad_norm"][-1]
             ).cpu(),  # TODO @sahilj: return an average or something later
+            "icepop_metrics": final_icepop_metrics,
         }
         
-        # Add ICEPOP metrics to the main metrics dictionary
-        metrics.update(final_icepop_metrics)
+        # # Add ICEPOP metrics to the main metrics dictionary
+        # metrics.update(final_icepop_metrics)
         return metrics
 
     @wrap_with_nvtx_name("megatron_policy_worker/get_logprobs")

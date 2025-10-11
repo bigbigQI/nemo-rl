@@ -3,7 +3,7 @@
 #SBATCH --account=coreai_dlalgo_nemorl
 #SBATCH --exclusive
 #SBATCH --partition=batch
-#SBATCH --job-name=fp8_is_qwen3-8b
+#SBATCH --job-name=fp8_is_fix_qwen3-8b
 #SBATCH --mail-type=ALL
 #SBATCH --ntasks-per-node=1
 #SBATCH --nodes=2
@@ -34,7 +34,7 @@ export NCCL_AVOID_RECORD_STREAMS=1
 #export ENROOT_ROOTFS_WRITABLE=1
 
 
-JOBLOG="$(realpath .)/qwen3-8b-fp8-is-2node-$SLURM_JOB_ID.log"
+JOBLOG="$(realpath .)/qwen3-8b-fp8-is-fix-2node-$SLURM_JOB_ID.log"
 echo "$(date '+%Y-%m-%d %H:%M:%S') Job ${SLURM_JOB_ID} started ..." &>> ${JOBLOG}
 
 # launch ray daemon
@@ -72,7 +72,7 @@ echo "*******STARTING********" \
 && export WANDB_API_KEY=149737fd3c4537b349a37aab90b6fff96f385ebc \
 && export HF_HOME=/apps/.cache \
 && cd /apps/RL/ \
-&& uv run examples/run_grpo_math.py --config examples/configs/recipes/llm/qwen3-2n/grpo-qwen3-8b-2n8g-megatron-fp8-dapo-is.yaml
+&& uv run examples/run_grpo_math.py --config examples/configs/recipes/llm/qwen3-2n/grpo-qwen3-8b-2n8g-megatron-fp8-dapo-is-fix.yaml
 EOF
 
 

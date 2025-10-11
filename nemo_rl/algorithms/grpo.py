@@ -676,6 +676,20 @@ def grpo_train(
                         pad_value_dict={"token_ids": tokenizer.pad_token_id},
                     )
                     input_ids = batched_flat["token_ids"]
+                
+                # # Print a random training sample prompt
+                # random_train_idx = np.random.randint(0, len(batch["message_log"]))
+                # train_user_content = None
+                # for msg in batch["message_log"][random_train_idx]:
+                #     if msg["role"] == "user":
+                #         train_user_content = msg["content"]
+                #         break
+                # if train_user_content:
+                #     print(f"\n{'='*60}")
+                #     print(f"Random Training Sample Prompt (idx={random_train_idx}):")
+                #     print(f"{'-'*60}")
+                #     print(train_user_content)
+                #     print(f"{'='*60}\n", flush=True)
 
                 # Generate responses - this updates the LLMMessageLogType in repeated_batch
                 print(
@@ -947,14 +961,19 @@ def grpo_train(
             }
             metrics.update(train_results["all_mb_metrics"])
             
+            # Add ICEPOP metrics if present
+            if "icepop_metrics" in train_results:
+                metrics.update(train_results["icepop_metrics"])
             # Special handling for ICEPOP metrics that need max/min across the entire step
-            icepop_max_metrics = [
-                "importance_weights_before_icepop_max",
-                "importance_weights_after_icepop_max"
-            ]
-            icepop_min_metrics = [
-                "importance_weights_before_icepop_min", 
-                "importance_weights_after_icepop_min"
+            # These are already scalar values from megatron_policy_worker, not lists
+            icepop_scalar_metrics = [
+                "icepop_tokens_before",
+                "icepop_tokens_after", 
+                "icepop_token_filtering_ratio",
+                "importance_weights_before_max",
+                "importance_weights_before_min",
+                "importance_weights_after_max",
+                "importance_weights_after_min"
             ]
             
             for k, v in metrics.items():
@@ -967,12 +986,9 @@ def grpo_train(
                     "mean_prompt_length",
                 }:
                     metrics[k] = np.mean(v).item()
-                elif k in icepop_max_metrics:
-                    # For max metrics, take the maximum value across all microbatches
-                    metrics[k] = np.max(v).item()
-                elif k in icepop_min_metrics:
-                    # For min metrics, take the minimum value across all microbatches
-                    metrics[k] = np.min(v).item()
+                elif k in icepop_scalar_metrics:
+                    # ICEPOP metrics are already scalar values, don't aggregate
+                    continue
                 else:
                     metrics[k] = np.sum(v).item()
             metrics.update(rollout_metrics)
@@ -1097,6 +1113,21 @@ def validate(
         for batch_idx, val_batch in enumerate(val_dataloader):
             if batch_idx >= max_batches:
                 break
+            
+            # # Print a random validation sample prompt (only once, from the first batch)
+            # if batch_idx == 0:
+            #     random_val_idx = np.random.randint(0, len(val_batch["message_log"]))
+            #     val_user_content = None
+            #     for msg in val_batch["message_log"][random_val_idx]:
+            #         if msg["role"] == "user":
+            #             val_user_content = msg["content"]
+            #             break
+            #     if val_user_content:
+            #         print(f"\n{'='*60}")
+            #         print(f"Random Validation Sample Prompt (idx={random_val_idx}):")
+            #         print(f"{'-'*60}")
+            #         print(val_user_content)
+            #         print(f"{'='*60}\n", flush=True)
 
             # Replicate batch if num_evaluations_per_sample > 1
             if num_evaluations_per_sample > 1:

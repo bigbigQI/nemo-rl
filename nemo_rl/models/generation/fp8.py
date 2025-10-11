@@ -278,6 +278,9 @@ def _is_fp8_weight(name, model):
         if name.endswith("weight"):
             module = _get_module_from_param_name(model, name)
             # We currently only quantize linear layers
+            # print(f"module: {module}")
+            # print(f"is linearbase: {isinstance(module, LinearBase)}")
+            # print(f"weight dtype: {module.weight.dtype}")
             if (
                 isinstance(module, LinearBase)
                 and module.weight.dtype == torch.float8_e4m3fn

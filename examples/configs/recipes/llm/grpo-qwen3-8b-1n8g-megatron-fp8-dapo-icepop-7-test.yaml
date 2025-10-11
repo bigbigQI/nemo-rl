@@ -6,7 +6,7 @@ grpo:
   max_num_steps: 10
   normalize_rewards: true
   use_leave_one_out_baseline: true
-  val_period: 10
+  val_period: 3
   val_at_start: false
   overlong_filtering: false
   max_val_samples: 256
@@ -18,9 +18,7 @@ loss_fn:
   ratio_clip_max: 0.28
   ratio_clip_c: null
   use_on_policy_kl_approximation: false
-  use_importance_sampling_correction: True
-  use_icepop: False
-  print_is_log: False
+  use_importance_sampling_correction: true
   token_level_loss: true
 checkpointing:
   enabled: true
@@ -43,8 +41,9 @@ policy:
   make_sequence_length_divisible_by: 1
   max_grad_norm: 1
   use_icepop_fixed: True
-  icepop_min: 0.5
-  icepop_max: 1.5
+  icepop_min: 0.1
+  icepop_max: 10.0
+  print_log: true
 
   dtensor_cfg:
     enabled: False
@@ -142,13 +141,14 @@ policy:
         num_nodes: null
 data:
   max_input_seq_length: 8192
-  prompt_file: examples/prompts/cot.txt
+  prompt_file: null
   system_prompt_file: null
   dataset_name: DAPO
-  shuffle: true
+  shuffle: false
 env:
   math:
     num_workers: 8
+    use_dapo_math_verifier: true
 logger:
   log_dir: logs/grpo-qwen3-8b-1n8g-megatron-fp8-dapo-icepop-min-0.7-max-1.3-test
   num_val_samples_to_print: 0
@@ -157,7 +157,7 @@ logger:
   mlflow_enabled: false
   monitor_gpus: true
   wandb:
-    project: nemo-rl
+    project: nemo-rl-qwen3
     name: grpo-qwen3-8b-1n8g-megatron-fp8-dapo-icepop-min-0.7-max-1.3-test
   tensorboard: {}
   gpu_monitoring:

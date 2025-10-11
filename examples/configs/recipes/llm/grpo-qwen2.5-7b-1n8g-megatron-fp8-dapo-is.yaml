@@ -6,11 +6,12 @@ grpo:
   max_num_steps: 1000
   normalize_rewards: true
   use_leave_one_out_baseline: true
-  val_period: 5
+  val_period: 30
   val_at_start: false
   overlong_filtering: false
   max_val_samples: 256
   val_batch_size: 256
+  num_evaluations_per_sample: 1
   seed: 42
 loss_fn:
   reference_policy_kl_penalty: 0.01
@@ -26,7 +27,7 @@ checkpointing:
   metric_name: val_reward
   higher_is_better: true
   keep_top_k: 3
-  save_period: 5
+  save_period: 3
   checkpoint_must_save_by: null
 policy:
   model_name: /apps/models/Qwen2.5-7B
@@ -125,7 +126,7 @@ policy:
       tensor_parallel_size: 1
       pipeline_parallel_size: 1
       enable_expert_parallel: false
-      gpu_memory_utilization: 0.6
+      gpu_memory_utilization: 0.7
       max_model_len: 8192
       enforce_eager: False
       use_deep_gemm: true
@@ -138,13 +139,14 @@ policy:
         num_nodes: null
 data:
   max_input_seq_length: 8192
-  prompt_file: examples/prompts/cot.txt
+  prompt_file: null
   system_prompt_file: null
   dataset_name: DAPO
-  shuffle: true
+  shuffle: false
 env:
   math:
     num_workers: 8
+    use_dapo_math_verifier: true
 logger:
   log_dir: logs/grpo-qwen2.5-7b-1n8g-megatron-fp8-dapo-is
   num_val_samples_to_print: 0

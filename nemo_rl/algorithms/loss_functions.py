@@ -42,6 +42,10 @@ class ClippedPGLossConfig(TypedDict):
     # If False (default), correction is applied at the token level as in the
     # original GRPO paper.
     sequence_level_importance_ratios: NotRequired[bool]
+    # TIS (Truncated Importance Sampling) parameters
+    # If True, clip importance weights that exceed tis_clip
+    use_tis: NotRequired[bool]
+    tis_clip: NotRequired[float]
     # ICEPOP (Importance Clipping Enhancement for Policy Optimization) parameters
     # If True, filter importance weights to be within [icepop_min, icepop_max]
     # use_icepop: NotRequired[bool]
@@ -118,6 +122,9 @@ class ClippedPGLossFn(LossFunction):
             "sequence_level_importance_ratios",
             False,
         )
+        # TIS (Truncated Importance Sampling) parameters
+        self.use_tis = cfg.get("use_tis", False)
+        self.tis_clip = cfg.get("tis_clip", 10.0)
         # # ICEPOP parameters
         # self.use_icepop = cfg.get("use_icepop", False)
         # self.icepop_min = cfg.get("icepop_min", 0.0)
@@ -297,6 +304,12 @@ class ClippedPGLossFn(LossFunction):
             importance_weights_to_use = actor_importance_weights
         else:
             importance_weights_to_use = torch.ones_like(prev_logprobs)
+        
+        # TIS (Truncated Importance Sampling): clip large importance weights
+        if self.use_tis and self.use_importance_sampling_correction:
+            importance_weights_to_use = torch.clamp(
+                importance_weights_to_use, max=self.tis_clip
+            )
             
         # importance_weights_before_icepop = importance_weights_to_use.clone()
         
@@ -316,16 +329,16 @@ class ClippedPGLossFn(LossFunction):
         #     importance_weights_before_icepop_np = importance_weights_before_icepop_masked.cpu().numpy()
         #     importance_weights_to_use_np = importance_weights_to_use_masked.cpu().numpy()
 
-            # import os
-            # import uuid
-            # os.makedirs("log_data_importance_weights_fp8_step12", exist_ok=True)
-            # unique_suffix = uuid.uuid4().hex
-            # before_icepop_filename = f"log_data_importance_weights_fp8_step12/importance_weights_before_icepop_{unique_suffix}.bin"
-            # to_use_filename = f"log_data_importance_weights_fp8_step12/importance_weights_to_use_{unique_suffix}.bin"
-            # with open(before_icepop_filename, "wb") as f:
-            #     f.write(importance_weights_before_icepop_np.tobytes())
-            # with open(to_use_filename, "wb") as f:
-            #     f.write(importance_weights_to_use_np.tobytes())
+        #     import os
+        #     import uuid
+        #     os.makedirs("log_data_importance_weights_fp8_step12", exist_ok=True)
+        #     unique_suffix = uuid.uuid4().hex
+        #     before_icepop_filename = f"log_data_importance_weights_fp8_step12/importance_weights_before_icepop_{unique_suffix}.bin"
+        #     to_use_filename = f"log_data_importance_weights_fp8_step12/importance_weights_to_use_{unique_suffix}.bin"
+        #     with open(before_icepop_filename, "wb") as f:
+        #         f.write(importance_weights_before_icepop_np.tobytes())
+        #     with open(to_use_filename, "wb") as f:
+        #         f.write(importance_weights_to_use_np.tobytes())
 
         if self.loss_type == LossType.TOKEN_LEVEL:
             actor_loss = masked_mean(
