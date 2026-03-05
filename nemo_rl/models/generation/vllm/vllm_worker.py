@@ -232,55 +232,6 @@ class BaseVllmGenerationWorker:
             with open(file_to_patch, "w") as f:
                 f.write(content)
 
-        def _patch_vllm_vit_flash_attn_backend():
-            """Patch vLLM vision attention backend selection logic.
-
-            Modify the CUDA branch of maybe_get_vit_flash_attn_backend in
-            vllm.attention.layer to avoid overriding the backend when it
-            is already set to XFORMERS. This avoids flash attention related
-            errors when the ViT head dimension is not a multiple of 32.
-
-            Related issues:
-            - https://github.com/vllm-project/vllm/issues/27562
-            - https://github.com/vllm-project/vllm/issues/26989
-
-            This is properly fixed in https://github.com/vllm-project/vllm/pull/28763. We can remove this patch once we upgrade to a version of vllm that contains this fix.
-            """
-            file_to_patch = _get_vllm_file("attention/layer.py")
-            with open(file_to_patch, "r") as f:
-                content = f.read()
-
-            old_snippet = (
-                "    elif current_platform.is_cuda():\n"
-                "        if (\n"
-                "            attn_backend != AttentionBackendEnum.FLASH_ATTN\n"
-                "            and check_upstream_fa_availability(torch.get_default_dtype())\n"
-                "        ):\n"
-                "            attn_backend = AttentionBackendEnum.FLASH_ATTN\n"
-                "            use_upstream_fa = True\n"
-            )
-
-            new_snippet = (
-                "    elif current_platform.is_cuda():\n"
-                "        if (\n"
-                "            attn_backend != AttentionBackendEnum.FLASH_ATTN\n"
-                "            and attn_backend != AttentionBackendEnum.XFORMERS\n"
-                "            and check_upstream_fa_availability(torch.get_default_dtype())\n"
-                "        ):\n"
-                "            attn_backend = AttentionBackendEnum.FLASH_ATTN\n"
-                "            use_upstream_fa = True\n"
-            )
-
-            # Only patch if the file still has the old snippet and
-            # hasn't been patched already.
-            if new_snippet in content or old_snippet not in content:
-                return
-
-            content = content.replace(old_snippet, new_snippet)
-
-            with open(file_to_patch, "w") as f:
-                f.write(content)
-
         def _patch_vllm_speculative_decoding_post_step():
             """Patch vLLM speculative decoding post_step call.
 
@@ -320,10 +271,27 @@ class BaseVllmGenerationWorker:
         _patch_vllm_init_workers_ray()
         logger.info("Successfully patched vllm _init_workers_ray.")
 
-        _patch_vllm_vit_flash_attn_backend()
-        logger.info("Successfully patched vllm vit flash attention backend.")
-
         _patch_vllm_speculative_decoding_post_step()
+
+        # Patch for transformers Qwen3.5 RoPE bug: ignore_keys_at_rope_validation
+        # can arrive as a list from JSON deserialization, but the code uses set union
+        # which fails with TypeError on list | set. Wrap in set() to normalize.
+        # Upstream fix: https://github.com/huggingface/transformers/pull/44272 (merged)
+        # TODO: Remove once transformers >= 5.3.0 (or whichever release includes the fix) is on PyPI.
+     #   try:
+     #       from transformers import PretrainedConfig as _HfPretrainedConfig
+
+     #       _orig_convert = _HfPretrainedConfig.convert_rope_params_to_dict
+
+     #       def _patched_convert_rope_params_to_dict(self, ignore_keys_at_rope_validation=None, **kwargs):
+     #           if ignore_keys_at_rope_validation is not None and not isinstance(ignore_keys_at_rope_validation, set):
+     #               ignore_keys_at_rope_validation = set(ignore_keys_at_rope_validation)
+     #           return _orig_convert(self, ignore_keys_at_rope_validation=ignore_keys_at_rope_validation, **kwargs)
+
+     #       _HfPretrainedConfig.convert_rope_params_to_dict = _patched_convert_rope_params_to_dict
+     #       logger.info("Successfully patched transformers convert_rope_params_to_dict for Qwen3.5 RoPE fix.")
+     #   except (ImportError, AttributeError):
+     #       pass
 
         try:
             import vllm
@@ -426,12 +394,14 @@ class BaseVllmGenerationWorker:
                 )
                 # disable quantization
                 vllm_kwargs["hf_overrides"]["quantization_config"] = {}
-        elif "Gemma3ForConditionalGeneration" in getattr(
-            hf_config, "architectures", []
+        elif any(
+            arch in getattr(hf_config, "architectures", [])
+            for arch in ("Gemma3ForConditionalGeneration", "Qwen3_5ForConditionalGeneration", "Qwen3_5MoeForConditionalGeneration")
         ):
             if self.cfg["vllm_cfg"]["skip_tokenizer_init"]:
-                print(
-                    "Gemma3ForConditionalGeneration models may crash when skip_tokenizer_init is True. NeMo-RL is forcing it to False for this architecture. See https://github.com/NVIDIA-NeMo/RL/issues/1681 for more details."
+                logger.info(
+                    "ForConditionalGeneration architectures require a tokenizer for multimodal "
+                    "processor init. Forcing skip_tokenizer_init to False."
                 )
             self.cfg["vllm_cfg"]["skip_tokenizer_init"] = False
 
@@ -880,6 +850,33 @@ class VllmGenerationWorker(BaseVllmGenerationWorker):
         gc.collect()
         torch.cuda.empty_cache()
 
+    def _teardown_compiled_dag(self):
+        """Tear down the Ray compiled DAG used for TP communication.
+
+        After sleep/wake cycles, the compiled DAG may hold stale state (NCCL
+        communicator references, CUDA graph captures) that can cause TP workers
+        to deadlock on the next forward pass.  Tearing it down forces a fresh
+        rebuild on the next ``generate()`` call via the lazy-init path in
+        ``RayDistributedExecutor._execute_dag``.
+        """
+        try:
+            executor = self.llm.llm_engine.model_executor
+            if hasattr(executor, "forward_dag") and executor.forward_dag is not None:
+                executor.forward_dag.teardown()
+                executor.forward_dag = None
+
+                # Reset the per-worker CUDA device flag so that
+                # ``setup_device_if_necessary`` re-runs ``set_device`` on the
+                # (potentially new) compiled-DAG background thread.
+                def _reset_dag_cuda_flag(worker_self):
+                    worker_self.compiled_dag_cuda_device_set = False
+
+                executor.collective_rpc(_reset_dag_cuda_flag)
+        except Exception:
+            import traceback
+
+            traceback.print_exc()
+
     def sleep(self):
         """Put the vLLM engine to sleep."""
         assert self.llm is not None, (
@@ -893,6 +890,11 @@ class VllmGenerationWorker(BaseVllmGenerationWorker):
 
         # Reset the prefix cache to ensure that prefix cache is not reused after weights are updated
         self.llm.llm_engine.reset_prefix_cache()
+
+        # Tear down the compiled DAG before sleeping to avoid stale NCCL/CUDA
+        # graph state that can cause TP worker deadlocks after wake-up.
+        self._teardown_compiled_dag()
+
         self.llm.sleep(level=1)
 
         gc.collect()

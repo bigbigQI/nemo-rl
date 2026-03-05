@@ -42,11 +42,19 @@ else
 fi
 
 # Check and run automodel tests
+<<<<<<< HEAD
 exit_code=$(cd ${PROJECT_ROOT}/tests && uv run --extra automodel pytest "${TEST_PATHS[@]}" "${IGNORE[@]}" "${EXCLUDED_UNIT_TESTS[@]}" --collect-only --hf-gated --automodel-only -q >/dev/null 2>&1; echo $?)
 if [[ $exit_code -eq 5 ]]; then
     echo "No automodel tests to run"
 else
     uv run --extra automodel bash -x ./tests/run_unit.sh "${TEST_PATHS[@]}" "${IGNORE[@]}" "${EXCLUDED_UNIT_TESTS[@]}" --cov=nemo_rl --cov-append --cov-report=term-missing --cov-report=json --hf-gated --automodel-only
+=======
+exit_code=$(uv run --extra automodel --no-group transformers-v4 pytest tests/unit/ --ignore=tests/unit/models/generation/ --ignore=tests/unit/models/policy/ --collect-only --hf-gated --automodel-only -q >/dev/null 2>&1; echo $?)
+if [[ $exit_code -eq 5 ]]; then
+    echo "No automodel tests to run"
+else
+    uv run --extra automodel --no-group transformers-v4 bash -x ./tests/run_unit.sh unit/ --ignore=unit/models/generation/ --ignore=unit/models/policy/ --cov=nemo_rl --cov-append --cov-report=term-missing --cov-report=json --hf-gated --automodel-only
+>>>>>>> shuangyu/shuangy/qwen3.5-support
 fi
 
 # Check and run vllm tests

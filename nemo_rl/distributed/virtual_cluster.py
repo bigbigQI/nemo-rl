@@ -47,16 +47,16 @@ class PY_EXECUTABLES:
     BASE = f"uv run --locked --directory {git_root}"
 
     # Use NeMo-RL direct dependencies and vllm.
-    VLLM = f"uv run --locked --extra vllm --directory {git_root}"
+    VLLM = f"uv run --locked --extra vllm --no-group transformers-v4 --directory {git_root}"
 
     # Use NeMo-RL direct dependencies and fsdp.
     FSDP = f"uv run --locked --extra fsdp --directory {git_root}"
 
     # Use NeMo-RL direct dependencies and nemo-automodel.
-    AUTOMODEL = f"uv run --locked --extra automodel --directory {git_root}"
+    AUTOMODEL = f"uv run --locked --no-cache --extra automodel --no-group transformers-v4 --directory {git_root}"
 
     # Use NeMo-RL direct dependencies and Megatron.
-    MCORE = f"uv run --locked --extra mcore --directory {git_root}"
+    MCORE = f"uv run --locked --extra mcore --no-group transformers-v4 --directory {git_root}"
 
     # Use NeMo-Gym dependencies
     NEMO_GYM = f"uv run --locked --extra nemo_gym --directory {git_root}"
